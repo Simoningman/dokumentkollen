@@ -48,6 +48,7 @@ TEXTS = {
         "drop_hint": "Max 2 dokument · PDF, DOCX, TXT, MD, CSV, HTML",
         "drop_title_full": "Max antal dokument uppnått",
         "drop_hint_full": "Ta bort ett dokument för att kunna ladda upp ett nytt",
+        "browse": "Bläddra",
         "summarize": "✨ Sammanfatta",
         "compare": "⚖️ Jämför",
         "summary_title": "Sammanfattning",
@@ -58,7 +59,7 @@ TEXTS = {
     },
     "en": {
         "app_name": "Document Check",
-        "tagline": "UNDERSTAND YOUR DOCUMENTS IN SECONDS",
+        "tagline": "READ LESS. UNDERSTAND MORE.",
         "empty": "Drop one or more documents to get started.",
         "pages": "pages",
         "page": "page",
@@ -70,6 +71,7 @@ TEXTS = {
         "drop_hint": "Max 2 documents · PDF, DOCX, TXT, MD, CSV, HTML",
         "drop_title_full": "Maximum number of documents reached",
         "drop_hint_full": "Remove a document to upload a new one",
+        "browse": "Browse",
         "summarize": "✨ Summarize",
         "compare": "⚖️ Compare",
         "summary_title": "Summary",
@@ -210,6 +212,25 @@ st.markdown(
         display: block;
         margin-top: 2px;
     }}
+    /* Göm knappens inbyggda text/ikon oavsett struktur, visa egen etikett */
+    [data-testid="stFileUploaderDropzone"] button {{
+        font-size: 0 !important;
+        padding: 8px 18px !important;
+    }}
+    [data-testid="stFileUploaderDropzone"] button span,
+    [data-testid="stFileUploaderDropzone"] button div,
+    [data-testid="stFileUploaderDropzone"] button p,
+    [data-testid="stFileUploaderDropzone"] button svg,
+    [data-testid="stFileUploaderDropzone"] button i {{
+        display: none !important;
+        font-size: 0 !important;
+    }}
+    [data-testid="stFileUploaderDropzone"] button::after {{
+        content: var(--browse-label);
+        font-size: 0.85rem !important;
+        color: {TEXT};
+        display: inline !important;
+    }}
 
     /* ── Kommandorad — fält och knappar i exakt samma höjd (52px) ── */
     .st-key-askbar [data-baseweb="input"],
@@ -309,7 +330,8 @@ t = TEXTS[lang]
 # Dropzonens texter styrs via CSS-variabler så de följer språkvalet
 st.markdown(
     f"<style>:root {{ --drop-title: '{t['drop_title']}'; "
-    f"--drop-hint: '{t['drop_hint']}'; }}</style>",
+    f"--drop-hint: '{t['drop_hint']}'; "
+    f"--browse-label: '{t['browse']}'; }}</style>",
     unsafe_allow_html=True,
 )
 
