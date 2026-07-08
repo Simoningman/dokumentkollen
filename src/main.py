@@ -48,7 +48,6 @@ TEXTS = {
         "drop_hint": "Max 2 dokument · PDF, DOCX, TXT, MD, CSV, HTML",
         "drop_title_full": "Max antal dokument uppnått",
         "drop_hint_full": "Ta bort ett dokument för att kunna ladda upp ett nytt",
-        "browse": "Bläddra",
         "summarize": "✨ Sammanfatta",
         "compare": "⚖️ Jämför",
         "summary_title": "Sammanfattning",
@@ -71,7 +70,6 @@ TEXTS = {
         "drop_hint": "Max 2 documents · PDF, DOCX, TXT, MD, CSV, HTML",
         "drop_title_full": "Maximum number of documents reached",
         "drop_hint_full": "Remove a document to upload a new one",
-        "browse": "Browse",
         "summarize": "✨ Summarize",
         "compare": "⚖️ Compare",
         "summary_title": "Summary",
@@ -212,19 +210,6 @@ st.markdown(
         display: block;
         margin-top: 2px;
     }}
-    [data-testid="stFileUploaderDropzone"] button {{
-        font-size: 0 !important;
-        padding: 8px 16px !important;
-    }}
-    [data-testid="stFileUploaderDropzone"] button * {{
-    display: none !important;
-    }}
-
-    [data-testid="stFileUploaderDropzone"] button::after {{
-        content: var(--browse-label);
-        font-size: 0.85rem;
-        color: {TEXT};
-    }}
 
     /* ── Kommandorad — fält och knappar i exakt samma höjd (52px) ── */
     .st-key-askbar [data-baseweb="input"],
@@ -324,8 +309,7 @@ t = TEXTS[lang]
 # Dropzonens texter styrs via CSS-variabler så de följer språkvalet
 st.markdown(
     f"<style>:root {{ --drop-title: '{t['drop_title']}'; "
-    f"--drop-hint: '{t['drop_hint']}'; "
-    f"--browse-label: '{t['browse']}'; }}</style>",
+    f"--drop-hint: '{t['drop_hint']}'; }}</style>",
     unsafe_allow_html=True,
 )
 
