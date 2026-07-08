@@ -216,6 +216,10 @@ st.markdown(
         font-size: 0 !important;
         padding: 8px 16px !important;
     }}
+    [data-testid="stFileUploaderDropzone"] button * {{
+    display: none !important;
+    }}
+
     [data-testid="stFileUploaderDropzone"] button::after {{
         content: var(--browse-label);
         font-size: 0.85rem;
