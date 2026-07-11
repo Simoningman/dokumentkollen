@@ -1,4 +1,4 @@
-streamlit==1.59.0
+streamlit
 sentence-transformers
 docling
 PyMuPDF
