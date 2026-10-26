@@ -5,7 +5,9 @@ Ladda upp dokument, analysera, ladda ner som PDF. Inget sparas.
 Kör med: streamlit run src/main.py
 """
 
+import json
 import os
+import time
 from datetime import datetime
 
 import streamlit as st
@@ -15,12 +17,15 @@ os.environ["USE_TF"] = "0"
 os.environ["TRANSFORMERS_NO_TF"] = "1"
 
 import rag
+import agent  # importeras efter rag så att samma LaBSE-instans återanvänds
 from utils import extract_pages, create_pdf_bytes
 
 # -------------------------------------------------
 # Grundinställningar
 # -------------------------------------------------
 TOP_K = 8  # antal textutdrag som skickas till LLM:en
+AGENT_LIMIT = int(os.getenv("AGENT_SESSION_LIMIT", "10"))  # djupanalyser per session (kostnad)
+WARN = "#f5b942"
 
 ACCENT = "#2dd4bf"
 BG = "#0e1420"
@@ -55,6 +60,24 @@ TEXTS = {
         "analyzing": "Analyserar...",
         "based_on": "Baserat på",
         "download": "⬇️ Ladda ner som PDF",
+        "mode_fast": "⚡ Snabb",
+        "mode_deep": "🧠 Djupanalys",
+        "hint_fast": "Ett svar på några sekunder.",
+        "hint_deep": "Agenten söker flera gånger, läser tabeller och räknar exakt · 10–30 s",
+        "agent_working": "Agenten arbetar…",
+        "agent_done": "Agentens arbete",
+        "agent_failed": "Agenten kunde inte slutföra",
+        "agent_limit": "Max {n} djupanalyser per session. Använd Snabb eller ladda om sidan.",
+        "steps": "steg",
+        "s_list": "Läste dokumentlistan",
+        "s_kw": "Ordsökning",
+        "s_sem": "Sökte",
+        "s_sum": "Sammanfattade",
+        "s_cmp": "Jämförde",
+        "s_calc": "Räknade",
+        "s_none": "ingen träff",
+        "s_table": "tabell",
+        "p": "s.",
     },
     "en": {
         "app_name": "Document Check",
@@ -77,6 +100,24 @@ TEXTS = {
         "analyzing": "Analyzing...",
         "based_on": "Based on",
         "download": "⬇️ Download as PDF",
+        "mode_fast": "⚡ Quick",
+        "mode_deep": "🧠 Deep analysis",
+        "hint_fast": "One answer in a few seconds.",
+        "hint_deep": "The agent searches several times, reads tables and calculates exactly · 10–30 s",
+        "agent_working": "The agent is working…",
+        "agent_done": "Agent steps",
+        "agent_failed": "The agent could not finish",
+        "agent_limit": "Max {n} deep analyses per session. Use Quick or reload the page.",
+        "steps": "steps",
+        "s_list": "Read the document list",
+        "s_kw": "Keyword search",
+        "s_sem": "Searched",
+        "s_sum": "Summarized",
+        "s_cmp": "Compared",
+        "s_calc": "Calculated",
+        "s_none": "no match",
+        "s_table": "table",
+        "p": "p.",
     },
 }
 
@@ -179,6 +220,10 @@ st.markdown(
         font-size: 0.85rem !important;
     }}
     .stExpander summary:hover {{ color: {ACCENT} !important; }}
+    .stExpander details, .stExpander summary {{
+        background: {CARD} !important;   /* även st.status, som annars får ljus rubrik */
+        border-radius: 12px !important;
+    }}
     .stExpander summary p {{ color: inherit !important; }}
 
     /* File uploader */
@@ -288,6 +333,43 @@ st.markdown(
         padding: 6px 10px !important;
     }}
     .st-key-result th {{ color: {ACCENT} !important; }}
+
+    /* ── Lägesväljare Snabb / Djupanalys ── */
+    .st-key-modebar {{ margin-top: -6px; }}
+    .st-key-modebar [data-testid="stButtonGroup"] button {{
+        background: transparent !important;
+        border: 1px solid #2a3547 !important;
+        border-radius: 100px !important;
+        min-height: 0 !important;
+        padding: 3px 12px !important;
+    }}
+    .st-key-modebar [data-testid="stButtonGroup"] button p {{
+        color: {MUTED} !important;
+        font-size: 0.76rem !important;
+    }}
+    .st-key-modebar button[aria-checked="true"],
+    .st-key-modebar button[data-testid$="Active"] {{
+        border-color: {ACCENT} !important;
+        background: {ACCENT}14 !important;
+    }}
+    .st-key-modebar button[aria-checked="true"] p,
+    .st-key-modebar button[data-testid$="Active"] p {{ color: {ACCENT} !important; }}
+
+    .mode-hint {{ color: {MUTED} !important; font-size: 0.74rem; margin-left: -8px; }}
+    .agent-warn {{ color: {WARN} !important; font-size: 0.78rem; margin: 8px 2px 0; }}
+
+    /* Agentens steg */
+    .agent-step {{
+        font-size: 0.8rem; color: #c9d4e0; padding: 3px 0;
+        display: flex; gap: 8px; align-items: baseline;
+    }}
+    .agent-step .ok {{ color: {ACCENT} !important; }}
+    .agent-step .bad {{ color: {WARN} !important; }}
+    .agent-step .out {{ color: {MUTED} !important; }}
+    .agent-step code {{
+        background: #0e1420 !important; color: {TEXT} !important;
+        font-size: 0.76rem; padding: 1px 5px; border-radius: 4px;
+    }}
 </style>
 """,
     unsafe_allow_html=True,
@@ -460,6 +542,94 @@ with st.container(key="askbar"):
     with col_send:
         send = st.button("➤", key="send_btn", use_container_width=True)
 
+# Lägesväljare under frågefältet — gäller frågor (sammanfatta/jämför använder alltid RAG)
+with st.container(key="modebar"):
+    mode_col, hint_col = st.columns([2.3, 5], vertical_alignment="center")
+    with mode_col:
+        mode = st.segmented_control(
+            "Läge", [t["mode_fast"], t["mode_deep"]], default=t["mode_fast"],
+            label_visibility="collapsed", key=f"mode_{lang}",
+        )
+    deep = mode == t["mode_deep"]
+    with hint_col:
+        st.markdown(
+            f"<div class='mode-hint'>{t['hint_deep'] if deep else t['hint_fast']}</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _short(name: str, n: int = 26) -> str:
+    return name if len(name) <= n else name[: n - 1] + "…"
+
+
+def step_html(e: dict) -> str:
+    """Gör ett agentsteg läsbart: '✓ Ordsökning «Soliditet» · fil.pdf → s. 35 · tabell'."""
+    try:
+        a = json.loads(e["args"]) if isinstance(e["args"], str) else (e["args"] or {})
+    except json.JSONDecodeError:
+        a = {}
+    doc = f" · {_short(a['document'])}" if a.get("document") else ""
+    tool = e["tool"]
+    if tool == "keyword_search":
+        what = f"{t['s_kw']} «{a.get('term', '')}»{doc}"
+    elif tool == "search_documents":
+        what = f"{t['s_sem']} «{a.get('query', '')}»{doc}"
+    elif tool == "calculate":
+        what = f"{t['s_calc']} <code>{a.get('expression', '')}</code>"
+    elif tool == "summarize_document":
+        what = f"{t['s_sum']} {_short(a.get('document', ''))}"
+    elif tool == "compare_documents":
+        what = f"{t['s_cmp']} «{a.get('focus', '')}»"
+    else:
+        what = t["s_list"]
+
+    if not e.get("ok", True):
+        icon, out = "<span class='bad'>⚠</span>", e["result"].removeprefix("FEL: ")[:90]
+    elif tool == "calculate":
+        icon, out = "<span class='ok'>✓</span>", "= " + e["result"].rsplit("=", 1)[-1].strip()
+    elif e.get("pages"):
+        icon = "<span class='ok'>✓</span>"
+        out = f"{t['p']} " + ", ".join(map(str, e["pages"][:6])) + (f" · {t['s_table']}" if e.get("table") else "")
+    elif tool in ("keyword_search", "search_documents"):
+        icon, out = "<span class='bad'>○</span>", t["s_none"]
+    else:
+        icon, out = "<span class='ok'>✓</span>", ""
+    arrow = f"<span class='out'>→ {out}</span>" if out else ""
+    return f"<div class='agent-step'>{icon}<span>{what}</span>{arrow}</div>"
+
+
+def _run_agent(question: str) -> None:
+    used = st.session_state.get("agent_count", 0)
+    if used >= AGENT_LIMIT:
+        st.warning(t["agent_limit"].format(n=AGENT_LIMIT))
+        return
+    started = time.time()
+    with st.status(t["agent_working"], expanded=True) as status:
+        def on_step(e: dict) -> None:
+            status.markdown(step_html(e), unsafe_allow_html=True)
+
+        try:
+            out = agent.run_agent(question, st.session_state.docs, on_step=on_step, language=lang)
+        except Exception as exc:
+            status.update(label=t["agent_failed"], state="error", expanded=True)
+            st.error(f"{t['agent_failed']}: {exc}")
+            return
+        status.update(label=t["agent_done"], state="complete", expanded=False)
+
+    st.session_state.agent_count = used + 1
+    st.session_state.result = {
+        "type": "agent",
+        "title": question,
+        "answer": out["answer"],
+        # Bara källor som svaret faktiskt citerar
+        "hits": [{"doc_name": s["doc"], "page_no": s["page"]} for s in out["sources"]],
+        "trace": out["trace"],
+        "warnings": out["warnings"],
+        "seconds": time.time() - started,
+    }
+    st.rerun()
+
+
 # Enter i fältet ger en rerun med nytt värde — kör då automatiskt
 new_query = query.strip() and query.strip() != st.session_state.get("done_query")
 
@@ -471,8 +641,11 @@ elif do_compare:
          rag.compare, docs, top_k=TOP_K, language=lang)
 elif (send and query.strip()) or new_query:
     st.session_state.done_query = query.strip()
-    _run("ask", query.strip(),
-         rag.ask, query.strip(), docs, top_k=TOP_K, language=lang)
+    if deep:
+        _run_agent(query.strip())
+    else:
+        _run("ask", query.strip(),
+             rag.ask, query.strip(), docs, top_k=TOP_K, language=lang)
 
 # -------------------------------------------------
 # 3. Resultat
@@ -485,8 +658,19 @@ if res:
         f"text-transform:uppercase;margin-bottom:8px'>📋 {res['title']}</div>",
         unsafe_allow_html=True,
     )
+    if res["type"] == "agent" and res.get("trace"):
+        n = len(res["trace"])
+        with st.expander(f"🧠 {t['agent_done']} · {n} {t['steps']} · {res['seconds']:.0f} s"):
+            st.markdown("".join(step_html(e) for e in res["trace"]), unsafe_allow_html=True)
+
     with st.container(key="result"):
         st.markdown(res["answer"])
+
+    for w in res.get("warnings", []):
+        st.markdown(
+            f"<div class='agent-warn'>⚠ {w}</div>",
+            unsafe_allow_html=True,
+        )
 
     if res["hits"]:
         # Gruppera per dokument: namn -> sorterade unika sidor
