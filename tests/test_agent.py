@@ -46,7 +46,8 @@ class ScriptedLLM:
 
     def __call__(self, messages, tools, final=False):
         self.seen.append([dict(m) for m in messages])
-        return self.replies.pop(0)
+        # Slut på manus = modellen står fast vid sitt senaste svar (t.ex. efter en spärr)
+        return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
 
 
 def test_agent_uses_tools_then_answers():
@@ -202,3 +203,68 @@ def test_guardrail_only_once():
     llm = ScriptedLLM([{"content": "gissning"}, {"content": "gissning igen"}])
     r = run_agent("?", DOCS, chat=llm)
     assert r["answer"] == "gissning igen" and r["stopped"] == "answered"
+
+
+def test_result_lists_searched_pages_even_without_citations():
+    llm = ScriptedLLM([
+        {"tool_calls": [call(1, "search_documents", query="krav")]},
+        {"content": "Hittades inte i sökningarna."},
+    ])
+    r = run_agent("?", DOCS, chat=llm)
+    assert r["sources"] == []
+    assert {x["doc"] for x in r["searched"]} == {"alfa.md", "beta.md"}
+
+
+def test_absence_claim_requires_search_in_that_document():
+    llm = ScriptedLLM([
+        {"tool_calls": [call(1, "summarize_document", document="beta.md"),
+                        call(2, "keyword_search", term="Soliditet", document="alfa.md")]},
+        {"content": "Beta nämner inte soliditet."},                     # beta aldrig sökt i
+        {"tool_calls": [call(3, "keyword_search", term="soliditet", document="beta.md")]},
+        {"content": "Soliditet hittades inte i sökningarna (beta.md, s. 2)."},
+    ])
+    r = run_agent("?", DOCS, chat=llm)
+    tools = [t["tool"] for t in r["trace"]]
+    assert tools == ["summarize_document", "keyword_search", "guardrail", "keyword_search"]
+    assert '"beta.md"' in r["trace"][2]["args"]
+    assert r["warnings"] == []
+
+
+def test_absence_ok_when_searched_all_docs():
+    from src.agent import unsearched_for_absence
+    trace = [{"tool": "search_documents", "args": json.dumps({"query": "x"}), "ok": True}]
+    assert unsearched_for_absence("CV:t saknar SQLite.", trace, ["cv.pdf", "ex.pdf"]) == []
+    assert unsearched_for_absence("Allt finns med.", [], ["cv.pdf"]) == []
+
+
+def test_answer_without_citations_is_sent_back_once():
+    llm = ScriptedLLM([
+        {"tool_calls": [call(1, "keyword_search", term="Soliditet")]},
+        {"content": "Alfa har 38 % soliditet."},
+        {"content": "Alfa har 38 % soliditet (alfa.md, s. 6)."},
+    ])
+    r = run_agent("?", DOCS, chat=llm)
+    assert [t["tool"] for t in r["trace"]] == ["keyword_search", "guardrail"]
+    assert r["sources"] == [{"doc": "alfa.md", "page": 6}]
+
+
+def test_short_terms_match_whole_words_only():
+    from src.agent import build_tools
+    docs = {"d.md": {"name": "d.md", "pages": 1, "chunks": [
+        {"page_no": 1, "text": "Skicka mail till oss"},
+        {"page_no": 2, "text": "Vi bygger AI-verktyg för dokument"}]}}
+    hits = build_tools(docs, [])["keyword_search"]("AI")
+    assert [h["page"] for h in hits] == [2]
+
+
+def test_cited_accepts_abbreviated_names_and_ranges():
+    from src.agent import _cited
+    sources = [{"doc_name": "Simon Ingman CV (1).pdf", "page_no": 1},
+               {"doc_name": "AI examensarbete_ (3).pdf", "page_no": 1},
+               {"doc_name": "AI examensarbete_ (3).pdf", "page_no": 9},
+               {"doc_name": "AI examensarbete_ (3).pdf", "page_no": 10}]
+    got = _cited("Python (CV, s. 1). Begränsningar (examensarbete, s. 9–10).", sources)
+    assert {"doc": "Simon Ingman CV (1).pdf", "page": 1} in got
+    assert {"doc": "AI examensarbete_ (3).pdf", "page": 9} in got
+    assert {"doc": "AI examensarbete_ (3).pdf", "page": 10} in got
+    assert {"doc": "AI examensarbete_ (3).pdf", "page": 1} not in got  # sid 1 citerades inte för det

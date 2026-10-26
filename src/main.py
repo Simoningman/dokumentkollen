@@ -59,6 +59,7 @@ TEXTS = {
         "compare_title": "Jämförelse",
         "analyzing": "Analyserar...",
         "based_on": "Baserat på",
+        "searched": "Genomsökt",
         "download": "⬇️ Ladda ner som PDF",
         "mode_fast": "⚡ Snabb",
         "mode_deep": "🧠 Djupanalys",
@@ -78,6 +79,8 @@ TEXTS = {
         "s_none": "ingen träff",
         "s_table": "tabell",
         "s_guard": "Försökte svara utan att läsa – skickades tillbaka",
+        "s_guard_abs": "Påstod att något saknas utan att söka i {docs} – skickades tillbaka",
+        "s_guard_cite": "Svarade utan källor – skickades tillbaka",
         "p": "s.",
     },
     "en": {
@@ -100,6 +103,7 @@ TEXTS = {
         "compare_title": "Comparison",
         "analyzing": "Analyzing...",
         "based_on": "Based on",
+        "searched": "Searched",
         "download": "⬇️ Download as PDF",
         "mode_fast": "⚡ Quick",
         "mode_deep": "🧠 Deep analysis",
@@ -119,6 +123,8 @@ TEXTS = {
         "s_none": "no match",
         "s_table": "table",
         "s_guard": "Tried to answer without reading – sent back",
+        "s_guard_abs": "Claimed something is missing without searching {docs} – sent back",
+        "s_guard_cite": "Answered without sources – sent back",
         "p": "p.",
     },
 }
@@ -583,8 +589,13 @@ def step_html(e: dict) -> str:
     elif tool == "compare_documents":
         what = f"{t['s_cmp']} «{a.get('focus', '')}»"
     elif tool == "guardrail":
+        label = t["s_guard"]
+        if a.get("kind") == "cite":
+            label = t["s_guard_cite"]
+        elif a.get("kind") == "absence":
+            label = t["s_guard_abs"].format(docs=", ".join(_short(d) for d in a.get("docs", [])))
         return (f"<div class='agent-step'><span class='bad'>↺</span>"
-                f"<span class='out'>{t['s_guard']}</span></div>")
+                f"<span class='out'>{label}</span></div>")
     else:
         what = t["s_list"]
 
@@ -628,6 +639,8 @@ def _run_agent(question: str) -> None:
         "answer": out["answer"],
         # Bara källor som svaret faktiskt citerar
         "hits": [{"doc_name": s["doc"], "page_no": s["page"]} for s in out["sources"]],
+        # Inga citat? Visa då var agenten letade, så att "hittades inte" går att kontrollera
+        "searched": [{"doc_name": s["doc"], "page_no": s["page"]} for s in out.get("searched", [])],
         "trace": out["trace"],
         "warnings": out["warnings"],
         "seconds": time.time() - started,
@@ -677,10 +690,11 @@ if res:
             unsafe_allow_html=True,
         )
 
-    if res["hits"]:
+    shown = res["hits"] or res.get("searched", [])
+    if shown:
         # Gruppera per dokument: namn -> sorterade unika sidor
         by_doc: dict = {}
-        for hit in res["hits"]:
+        for hit in shown:
             by_doc.setdefault(hit["doc_name"], set()).add(hit["page_no"])
         parts = []
         for name, page_set in by_doc.items():
@@ -690,7 +704,7 @@ if res:
             parts.append(f"📄 {name} ({label} {page_str})")
         st.markdown(
             f"<div style='color:{MUTED};font-size:0.78rem;margin:10px 2px 14px'>"
-            f"{t['based_on']}: {'  ·  '.join(parts)}</div>",
+            f"{t['based_on'] if res['hits'] else t['searched']}: {'  ·  '.join(parts)}</div>",
             unsafe_allow_html=True,
         )
 

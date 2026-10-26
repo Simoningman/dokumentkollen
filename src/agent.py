@@ -30,6 +30,8 @@ else:
     from src.rag import CHAT_URL, LLM_API_KEY, MODEL_NAME, compare, search, summarize
 
 MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "8"))
+# Agenten kräver mer av modellen än vanlig RAG (planering, många steg, sammanställning).
+# Sätt AGENT_LLM_MODEL för en större modell bara till Djupanalys; annars samma som LLM_MODEL.
 RESULT_MAX_CHARS = 4000  # håller kontexten liten
 
 SYSTEM_PROMPT = """Du är Dokumentkollens analysagent. Du besvarar frågor om användarens
@@ -54,6 +56,9 @@ Arbetssätt:
 - Skillnad mellan två procentsatser anges i procentenheter.
 - Säg aldrig att du använt ett verktyg som du inte anropat.
 - list_documents ger bara filnamn. Beskriv aldrig innehåll du inte läst med ett verktyg.
+- Påstå att något SAKNAS i ett dokument bara om du sökt efter just det i just det dokumentet
+  (helst keyword_search). En sammanfattning räcker inte – den tappar detaljer.
+- Spekulera inte ("troligen", "säkert", "borde ha"). Skriv bara det du har stöd för.
   Frågor om vad dokument handlar om: använd summarize_document per dokument.
 
 Svaret:
@@ -61,7 +66,7 @@ Svaret:
 - Egna slutsatser markeras "Bedömning:" och får inte påstå något som dokumentet inte säger.
 - Hittar du inte något: skriv "hittades inte i sökningarna", aldrig "saknas i dokumentet".
 - Avsluta inte med en motfråga till användaren – ge ett färdigt svar.
-- Svara på samma språk som frågan, kort och strukturerat. Anpassa formen efter frågan:
+- Svara på samma språk som frågan. Håll det kort: normalt under 250 ord. Anpassa formen efter frågan:
   en enkel fråga får ett kort svar, inte rubriker."""
 
 GENERAL_KNOWLEDGE_RULE = """
@@ -173,6 +178,37 @@ TOOLS: List[Dict[str, Any]] = [
 CONTENT_TOOLS = {"search_documents", "keyword_search", "summarize_document", "compare_documents"}
 NUDGE = ("Du har inte läst något innehåll än – bara filnamn. Använd sök- eller "
          "sammanfattningsverktygen innan du svarar, och ange källor.")
+
+
+SEARCH_TOOLS = {"search_documents", "keyword_search"}
+_CITATION = re.compile(r"\b(?:s|p|sid|sida|page)\.?\s*\d+", re.IGNORECASE)
+CITE_NUDGE = ("Ditt svar saknar källor. Ange (exakt filnamn, s. X) efter varje påstående "
+              "från dokumenten, och stryk påståenden du inte kan belägga med en sökträff.")
+_ABSENCE = re.compile(
+    r"nämns inte|nämner inte|nämner aldrig|saknar|saknas|förekommer inte|finns inte med|"
+    r"not mentioned|does not mention|doesn't mention|lacks|is missing|are missing",
+    re.IGNORECASE,
+)
+
+
+def unsearched_for_absence(answer: str, trace: List[Dict[str, Any]], doc_names: List[str]) -> List[str]:
+    """Dokument som svaret påstår saknar något, men som agenten aldrig sökt i.
+
+    'Saknas'-påståenden kräver att man letat. Är inget dokument sökt i (bara sammanfattat)
+    är påståendet en gissning. Med 1–2 dokument kräver vi att alla har sökts i.
+    """
+    if not _ABSENCE.search(answer):
+        return []
+    searched: set = set()
+    for t in trace:
+        if t["tool"] not in SEARCH_TOOLS or not t.get("ok", True):
+            continue
+        try:
+            doc = (json.loads(t["args"]) if isinstance(t["args"], str) else t["args"] or {}).get("document")
+        except (json.JSONDecodeError, AttributeError):
+            doc = None
+        searched.update([doc] if doc else doc_names)  # utan document = sökte i alla
+    return [d for d in doc_names if d not in searched]
 
 
 class ToolError(Exception):
@@ -310,16 +346,19 @@ def build_tools(docs: Dict[str, Dict[str, Any]], sources: List[Dict[str, Any]]) 
     def keyword_search(term: str, document: Optional[str] = None, max_hits: int = 4) -> Any:
         """Exakt ordsökning. Hittar tabeller och nyckeltal som semantisk sökning missar."""
         needle = term.lower().strip()
-        if len(needle) < 3:
-            raise ToolError("Söktermen måste ha minst 3 tecken.")
+        if len(needle) < 2:
+            raise ToolError("Söktermen måste ha minst 2 tecken.")
+        # Korta termer (AI, ML, EU) matchas som hela ord – annars träffar 'ai' i 'mail'
+        pattern = re.compile(re.escape(needle) if len(needle) >= 3 else rf"(?<!\w){re.escape(needle)}(?!\w)")
         found = []
         for doc in _pick(docs, [document] if document else None):
             for chunk in doc["chunks"]:
                 low = chunk["text"].lower()
-                count = low.count(needle)
+                matches = list(pattern.finditer(low))
+                count = len(matches)
                 if count:
-                    pos, table = low.find(needle), None
-                    for m in re.finditer(re.escape(needle), low):  # första förekomsten som är en tabellrad
+                    pos, table = matches[0].start(), None
+                    for m in matches:  # första förekomsten som är en tabellrad
                         table = table_row(chunk["text"], m.start(), len(needle))
                         if table:
                             pos = m.start()
@@ -357,7 +396,8 @@ def _chat(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], final: bo
     if not CHAT_URL or not MODEL_NAME:
         raise RuntimeError("CHAT_URL eller LLM_MODEL saknas i .env")
 
-    payload: Dict[str, Any] = {"model": MODEL_NAME, "messages": messages, "temperature": 0.1}
+    model = os.getenv("AGENT_LLM_MODEL") or MODEL_NAME
+    payload: Dict[str, Any] = {"model": model, "messages": messages, "temperature": 0.1}
     if not final:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -423,6 +463,8 @@ def run_agent(
     ]
 
     nudged = False
+    absence_nudged = False
+    cite_nudged = False
     for step in range(1, max_steps + 1):
         msg = chat(messages, TOOLS)
         calls = msg.get("tool_calls") or []
@@ -438,7 +480,33 @@ def run_agent(
                               "result": "Svar utan läst innehåll – agenten skickades tillbaka.",
                               "pages": [], "table": False})
                 continue
-            return _result(msg.get("content") or "", trace, sources, step, "answered")
+            missing = unsearched_for_absence(msg.get("content") or "", trace, list(docs))
+            if missing and not absence_nudged and step < max_steps:
+                # Påstår att något saknas i ett dokument den aldrig sökt i. Skicka tillbaka en gång.
+                absence_nudged = True
+                names = ", ".join(missing)
+                messages.append({"role": "assistant", "content": msg.get("content") or ""})
+                messages.append({"role": "user", "content": (
+                    f"Du påstår att saker saknas, men du har aldrig sökt i: {names}. "
+                    "Sök efter varje sak du säger saknas i det dokumentet (keyword_search) "
+                    "och svara sedan igen. Stryk påståenden du inte kan belägga.")})
+                trace.append({"step": step, "tool": "guardrail",
+                              "args": json.dumps({"kind": "absence", "docs": missing}, ensure_ascii=False),
+                              "ok": False, "result": f"Saknas-påstående utan sökning i {names}.",
+                              "pages": [], "table": False})
+                continue
+            answer = msg.get("content") or ""
+            read_content = any(t["tool"] in CONTENT_TOOLS for t in trace)
+            if read_content and not _CITATION.search(answer) and not cite_nudged and step < max_steps:
+                # Läste dokument men citerar inget = påståendena går inte att kontrollera.
+                cite_nudged = True
+                messages.append({"role": "assistant", "content": answer})
+                messages.append({"role": "user", "content": CITE_NUDGE})
+                trace.append({"step": step, "tool": "guardrail",
+                              "args": json.dumps({"kind": "cite"}), "ok": False,
+                              "result": "Svar utan källor.", "pages": [], "table": False})
+                continue
+            return _result(answer, trace, sources, step, "answered", list(docs))
 
         messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
         for call in calls:
@@ -463,7 +531,7 @@ def run_agent(
         "content": "Du har nått max antal steg. Svara nu med det du har hittat och säg vad som saknas.",
     })
     msg = chat(messages, TOOLS, final=True)
-    return _result(msg.get("content") or "", trace, sources, max_steps, "max_steps")
+    return _result(msg.get("content") or "", trace, sources, max_steps, "max_steps", list(docs))
 
 
 def _cited(answer: str, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -480,10 +548,38 @@ def _cited(answer: str, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         unique = sum(1 for d, p in {(x["doc_name"], x["page_no"]) for x in sources} if p == h["page_no"]) == 1
         if re.search(with_name, answer) or (unique and re.search(page, answer)):
             out.append({"doc": h["doc_name"], "page": h["page_no"]})
+    # Förkortade namn: '(CV, s. 1)', '(examensarbete, s. 9–10)' räknas om förkortningen
+    # entydigt pekar ut ett dokument och sidan faktiskt fanns bland träffarna
+    have = {(h["doc_name"], h["page_no"]) for h in sources}
+    names = sorted({d for d, _ in have})
+    for label, pages in _CITE_ABBR.findall(answer):
+        label = label.strip().lower()
+        matching = [n for n in names if len(label) >= 2 and label in n.lower()]
+        if len(matching) != 1:
+            continue
+        for p in _expand_pages(pages):
+            item = {"doc": matching[0], "page": p}
+            if (matching[0], p) in have and item not in out:
+                out.append(item)
     return out
 
 
-def check_answer(answer: str, trace: List[Dict[str, Any]]) -> List[str]:
+_CITE_ABBR = re.compile(r"\(([^(),]{2,60}),\s*s\.\s*([\d\s,–\-och]+)\)")
+
+
+def _expand_pages(text: str) -> List[int]:
+    """'2, 5, 10' -> [2, 5, 10]; '9–10' -> [9, 10]; '4 och 5' -> [4, 5]."""
+    pages: List[int] = []
+    for part in re.split(r",|och", text):
+        nums = [int(n) for n in re.findall(r"\d+", part)]
+        if len(nums) == 2 and re.search(r"[–-]", part) and 0 <= nums[1] - nums[0] <= 20:
+            pages.extend(range(nums[0], nums[1] + 1))
+        else:
+            pages.extend(nums)
+    return pages
+
+
+def check_answer(answer: str, trace: List[Dict[str, Any]], doc_names: Optional[List[str]] = None) -> List[str]:
     """Enkla kontroller av svaret mot vad agenten faktiskt gjorde (guardrails)."""
     used = {t["tool"] for t in trace}
     low = answer.lower()
@@ -494,17 +590,22 @@ def check_answer(answer: str, trace: List[Dict[str, Any]]) -> List[str]:
         warnings.append("Svaret säger 'saknas i dokumentet' – agenten kan bara veta att den inte hittade det.")
     if re.search(r"\d+[,.]?\d*\s*%", answer) and "calculate" not in used and re.search(r"tillväxt|ökning|minskning|skillnad", low):
         warnings.append("Svaret innehåller en beräknad förändring utan att calculate användes.")
+    unsearched = unsearched_for_absence(answer, trace, doc_names or [])
+    if unsearched:
+        warnings.append(f"Svaret påstår att något saknas, men agenten sökte aldrig i: {', '.join(unsearched)}.")
     return warnings
 
 
-def _result(answer: str, trace, sources, steps: int, stopped: str) -> Dict[str, Any]:
+def _result(answer: str, trace, sources, steps: int, stopped: str, doc_names=None) -> Dict[str, Any]:
     answer = answer.strip()
     return {
         "answer": answer,
         "trace": trace,
-        "warnings": check_answer(answer, trace),
+        "warnings": check_answer(answer, trace, doc_names),
         "sources": _cited(answer, sources),  # bara det som citeras
         "searched_pages": len({(h["doc_name"], h["page_no"]) for h in sources}),
+        # Alla lästa sidor – visas när svaret inte citerar något (t.ex. "hittades inte")
+        "searched": [{"doc": d, "page": p} for d, p in sorted({(h["doc_name"], h["page_no"]) for h in sources})],
         "steps": steps,
         "stopped": stopped,
     }
