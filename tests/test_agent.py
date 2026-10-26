@@ -281,3 +281,19 @@ def test_absence_guard_targets_the_document_the_claim_is_about():
     assert unsearched_for_absence(answer2, cv_only, docs) == ["AI examensarbete_ (5).pdf"]
     answer3 = "Det saknas uppgifter om detta."                            # inget namn -> alla
     assert unsearched_for_absence(answer3, cv_only, docs) == ["AI examensarbete_ (5).pdf"]
+
+
+def test_absence_under_section_heading_uses_heading_document():
+    from src.agent import unsearched_for_absence
+    docs = ["Simon Ingman CV (1).pdf", "examensarbete_100_procent.pdf"]
+    cv_only = [{"tool": "keyword_search", "ok": True,
+                "args": json.dumps({"term": "projekt", "document": "Simon Ingman CV (1).pdf"})}]
+    answer = ("CV:\n- Utbildning: Python (Simon Ingman CV (1).pdf, s. 2)\n- Saknar:\n"
+              "  - Konkreta exempel på projekt\n\nExamensarbete:\n- RAG (examensarbete, s. 3)")
+    assert unsearched_for_absence(answer, cv_only, docs) == []
+
+
+def test_guardrail_feedback_forbids_meta_comments():
+    llm = ScriptedLLM([{"content": "gissning"}, {"content": "ok"}])
+    run_agent("?", DOCS, chat=llm)
+    assert "nämn inte den här påminnelsen" in llm.seen[1][-1]["content"]

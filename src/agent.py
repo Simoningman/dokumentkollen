@@ -233,19 +233,37 @@ def _absence_targets(answer: str, doc_names: List[str]) -> List[str]:
     """
     tokens = _doc_tokens(doc_names)
     targets: List[str] = []
-    for line in answer.splitlines():
+    lines = answer.splitlines()
+
+    def mentions(line: str):
+        """(dokument, position) för varje dokumentnamn som nämns på raden."""
+        for name, ws in tokens.items():
+            for w in ws:
+                for hit in re.finditer(rf"(?<![a-zåäö]){re.escape(w)}(?![a-zåäö])", line.lower()):
+                    yield name, hit.start(), hit.end()
+
+    for i, line in enumerate(lines):
         for m in _ABSENCE.finditer(line):
             best, best_dist = None, None
-            for name, ws in tokens.items():
-                for w in ws:
-                    for hit in re.finditer(rf"(?<![a-zåäö]){re.escape(w)}(?![a-zåäö])", line.lower()):
-                        dist = min(abs(hit.start() - m.end()), abs(m.start() - hit.end()))
-                        if best_dist is None or dist < best_dist:
-                            best, best_dist = name, dist
+            for name, start, end in mentions(line):
+                dist = min(abs(start - m.end()), abs(m.start() - end))
+                if best_dist is None or dist < best_dist:
+                    best, best_dist = name, dist
+            if not best:
+                # 'Saknar:' under rubriken 'CV:' – titta uppåt efter närmaste dokument
+                for prev in reversed(lines[max(0, i - 12):i]):
+                    found = list(mentions(prev))
+                    if found:
+                        best = max(found, key=lambda f: f[1])[0]  # sist nämnda på raden
+                        break
             for d in ([best] if best else doc_names):
                 if d not in targets:
                     targets.append(d)
     return targets
+
+
+# Läggs till varje återkoppling från spärrarna – annars skriver modellen "Här är en korrigerad …"
+NO_META = " Svara som om detta vore ditt första svar och nämn inte den här påminnelsen."
 
 
 class ToolError(Exception):
@@ -512,7 +530,7 @@ def run_agent(
                 # Svar utan att ha läst något = gissning (t.ex. utifrån filnamn). Skicka tillbaka en gång.
                 nudged = True
                 messages.append({"role": "assistant", "content": msg.get("content") or ""})
-                messages.append({"role": "user", "content": NUDGE})
+                messages.append({"role": "user", "content": NUDGE + NO_META})
                 trace.append({"step": step, "tool": "guardrail", "args": "{}", "ok": False,
                               "result": "Svar utan läst innehåll – agenten skickades tillbaka.",
                               "pages": [], "table": False})
@@ -526,7 +544,7 @@ def run_agent(
                 messages.append({"role": "user", "content": (
                     f"Du påstår att saker saknas, men du har aldrig sökt i: {names}. "
                     "Sök efter varje sak du säger saknas i det dokumentet (keyword_search) "
-                    "och svara sedan igen. Stryk påståenden du inte kan belägga.")})
+                    "och svara sedan igen. Stryk påståenden du inte kan belägga." + NO_META)})
                 trace.append({"step": step, "tool": "guardrail",
                               "args": json.dumps({"kind": "absence", "docs": missing}, ensure_ascii=False),
                               "ok": False, "result": f"Saknas-påstående utan sökning i {names}.",
@@ -538,7 +556,7 @@ def run_agent(
                 # Läste dokument men citerar inget = påståendena går inte att kontrollera.
                 cite_nudged = True
                 messages.append({"role": "assistant", "content": answer})
-                messages.append({"role": "user", "content": CITE_NUDGE})
+                messages.append({"role": "user", "content": CITE_NUDGE + NO_META})
                 trace.append({"step": step, "tool": "guardrail",
                               "args": json.dumps({"kind": "cite"}), "ok": False,
                               "result": "Svar utan källor.", "pages": [], "table": False})
