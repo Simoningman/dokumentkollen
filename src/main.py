@@ -77,6 +77,7 @@ TEXTS = {
         "s_calc": "Räknade",
         "s_none": "ingen träff",
         "s_table": "tabell",
+        "s_guard": "Försökte svara utan att läsa – skickades tillbaka",
         "p": "s.",
     },
     "en": {
@@ -117,6 +118,7 @@ TEXTS = {
         "s_calc": "Calculated",
         "s_none": "no match",
         "s_table": "table",
+        "s_guard": "Tried to answer without reading – sent back",
         "p": "p.",
     },
 }
@@ -580,6 +582,9 @@ def step_html(e: dict) -> str:
         what = f"{t['s_sum']} {_short(a.get('document', ''))}"
     elif tool == "compare_documents":
         what = f"{t['s_cmp']} «{a.get('focus', '')}»"
+    elif tool == "guardrail":
+        return (f"<div class='agent-step'><span class='bad'>↺</span>"
+                f"<span class='out'>{t['s_guard']}</span></div>")
     else:
         what = t["s_list"]
 

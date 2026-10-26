@@ -94,6 +94,7 @@ def test_calculate_tool():
         {"tool_calls": [call(1, "calculate", expression="(184-162)/162*100"),
                         call(2, "calculate", expression="7,7 - 1,7")]},
         {"content": "ok"},
+        {"content": "ok"},  # skickas tillbaka en gång: calculate läser inget innehåll
     ])
     r = run_agent("?", DOCS, chat=llm)
     assert r["trace"][0]["result"].endswith("= 13.5802")
@@ -177,8 +178,27 @@ def test_prompt_is_not_tied_to_annual_reports():
 
 
 def test_general_knowledge_only_when_allowed():
-    llm = ScriptedLLM([{"content": "ok"}, {"content": "ok"}])
+    llm = ScriptedLLM([{"content": "ok"}, {"content": "ok"}, {"content": "ok"}, {"content": "ok"}])
     run_agent("?", DOCS, chat=llm)
     run_agent("?", DOCS, chat=llm, allow_general=True)
     assert "Allmän kunskap" not in llm.seen[0][0]["content"]
-    assert "Allmän kunskap" in llm.seen[1][0]["content"]
+    assert "Allmän kunskap" in llm.seen[2][0]["content"]
+
+
+def test_answer_without_reading_is_sent_back_once():
+    llm = ScriptedLLM([
+        {"tool_calls": [call(1, "list_documents")]},
+        {"content": "Dokumentet verkar vara ett CV."},          # gissning från filnamn
+        {"tool_calls": [call(2, "summarize_document", document="alfa.md")]},
+        {"content": "Sammanfattning (alfa.md, s. 1)."},
+    ])
+    r = run_agent("Vad handlar dokumenten om?", DOCS, chat=llm)
+    tools = [t["tool"] for t in r["trace"]]
+    assert tools == ["list_documents", "guardrail", "summarize_document"]
+    assert r["answer"] == "Sammanfattning (alfa.md, s. 1)."
+
+
+def test_guardrail_only_once():
+    llm = ScriptedLLM([{"content": "gissning"}, {"content": "gissning igen"}])
+    r = run_agent("?", DOCS, chat=llm)
+    assert r["answer"] == "gissning igen" and r["stopped"] == "answered"

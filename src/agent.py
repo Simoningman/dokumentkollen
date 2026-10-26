@@ -53,11 +53,14 @@ Arbetssätt:
 - Räkna aldrig i huvudet, inte ens enkla skillnader. Använd calculate för varje beräkning.
 - Skillnad mellan två procentsatser anges i procentenheter.
 - Säg aldrig att du använt ett verktyg som du inte anropat.
+- list_documents ger bara filnamn. Beskriv aldrig innehåll du inte läst med ett verktyg.
+  Frågor om vad dokument handlar om: använd summarize_document per dokument.
 
 Svaret:
 - Påståenden från dokumenten anges med källa: (exakt filnamn, s. X).
 - Egna slutsatser markeras "Bedömning:" och får inte påstå något som dokumentet inte säger.
 - Hittar du inte något: skriv "hittades inte i sökningarna", aldrig "saknas i dokumentet".
+- Avsluta inte med en motfråga till användaren – ge ett färdigt svar.
 - Svara på samma språk som frågan, kort och strukturerat. Anpassa formen efter frågan:
   en enkel fråga får ett kort svar, inte rubriker."""
 
@@ -166,6 +169,12 @@ TOOLS: List[Dict[str, Any]] = [
 # -------------------------------------------------
 # Verktygsimplementationer
 # -------------------------------------------------
+# Verktyg som faktiskt läser dokumentens innehåll (list_documents och calculate gör det inte)
+CONTENT_TOOLS = {"search_documents", "keyword_search", "summarize_document", "compare_documents"}
+NUDGE = ("Du har inte läst något innehåll än – bara filnamn. Använd sök- eller "
+         "sammanfattningsverktygen innan du svarar, och ange källor.")
+
+
 class ToolError(Exception):
     """Fel som skickas tillbaka till LLM:en så den kan rätta sig."""
 
@@ -413,11 +422,22 @@ def run_agent(
         {"role": "user", "content": question},
     ]
 
+    nudged = False
     for step in range(1, max_steps + 1):
         msg = chat(messages, TOOLS)
         calls = msg.get("tool_calls") or []
 
-        if not calls:  # LLM:en svarar -> klart
+        if not calls:  # LLM:en vill svara
+            read_content = any(t["tool"] in CONTENT_TOOLS for t in trace)
+            if not read_content and not nudged and step < max_steps:
+                # Svar utan att ha läst något = gissning (t.ex. utifrån filnamn). Skicka tillbaka en gång.
+                nudged = True
+                messages.append({"role": "assistant", "content": msg.get("content") or ""})
+                messages.append({"role": "user", "content": NUDGE})
+                trace.append({"step": step, "tool": "guardrail", "args": "{}", "ok": False,
+                              "result": "Svar utan läst innehåll – agenten skickades tillbaka.",
+                              "pages": [], "table": False})
+                continue
             return _result(msg.get("content") or "", trace, sources, step, "answered")
 
         messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
