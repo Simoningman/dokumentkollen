@@ -268,3 +268,16 @@ def test_cited_accepts_abbreviated_names_and_ranges():
     assert {"doc": "AI examensarbete_ (3).pdf", "page": 9} in got
     assert {"doc": "AI examensarbete_ (3).pdf", "page": 10} in got
     assert {"doc": "AI examensarbete_ (3).pdf", "page": 1} not in got  # sid 1 citerades inte för det
+
+
+def test_absence_guard_targets_the_document_the_claim_is_about():
+    from src.agent import unsearched_for_absence
+    docs = ["Simon Ingman CV (1).pdf", "AI examensarbete_ (5).pdf"]
+    cv_only = [{"tool": "keyword_search", "ok": True,
+                "args": json.dumps({"term": "RAG", "document": "Simon Ingman CV (1).pdf"})}]
+    answer = "RAG nämns inte i CV:t, trots att det är centralt i examensarbetet."
+    assert unsearched_for_absence(answer, cv_only, docs) == []          # gäller CV:t, som söktes
+    answer2 = "Examensarbetet saknar en diskussion om kostnader."
+    assert unsearched_for_absence(answer2, cv_only, docs) == ["AI examensarbete_ (5).pdf"]
+    answer3 = "Det saknas uppgifter om detta."                            # inget namn -> alla
+    assert unsearched_for_absence(answer3, cv_only, docs) == ["AI examensarbete_ (5).pdf"]

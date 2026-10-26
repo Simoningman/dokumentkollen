@@ -66,6 +66,7 @@ Svaret:
 - Egna slutsatser markeras "Bedömning:" och får inte påstå något som dokumentet inte säger.
 - Hittar du inte något: skriv "hittades inte i sökningarna", aldrig "saknas i dokumentet".
 - Avsluta inte med en motfråga till användaren – ge ett färdigt svar.
+- Beskriv inte din process i svaret ("korrigerad", "verifierad", "efter ny sökning").
 - Svara på samma språk som frågan. Håll det kort: normalt under 250 ord. Anpassa formen efter frågan:
   en enkel fråga får ett kort svar, inte rubriker."""
 
@@ -197,7 +198,8 @@ def unsearched_for_absence(answer: str, trace: List[Dict[str, Any]], doc_names: 
     'Saknas'-påståenden kräver att man letat. Är inget dokument sökt i (bara sammanfattat)
     är påståendet en gissning. Med 1–2 dokument kräver vi att alla har sökts i.
     """
-    if not _ABSENCE.search(answer):
+    targets = _absence_targets(answer, doc_names)
+    if not targets:
         return []
     searched: set = set()
     for t in trace:
@@ -208,7 +210,42 @@ def unsearched_for_absence(answer: str, trace: List[Dict[str, Any]], doc_names: 
         except (json.JSONDecodeError, AttributeError):
             doc = None
         searched.update([doc] if doc else doc_names)  # utan document = sökte i alla
-    return [d for d in doc_names if d not in searched]
+    return [d for d in targets if d not in searched]
+
+
+_GENERIC_NAME_WORDS = {"pdf", "docx", "doc", "txt", "md", "csv", "html", "ai", "mall", "kopia",
+                       "copy", "final", "ny", "new", "version", "utkast", "draft", "och", "the"}
+
+
+def _doc_tokens(doc_names: List[str]) -> Dict[str, set]:
+    """Ord i filnamnet som bara finns i det dokumentets namn, t.ex. 'cv', 'examensarbete'."""
+    words = {n: set(re.findall(r"[a-zåäö]{2,}", n.rsplit(".", 1)[0].lower())) - _GENERIC_NAME_WORDS
+             for n in doc_names}
+    return {n: {w for w in ws if all(w not in words[o] for o in doc_names if o != n)}
+            for n, ws in words.items()}
+
+
+def _absence_targets(answer: str, doc_names: List[str]) -> List[str]:
+    """Vilka dokument gäller 'saknas'-påståendena? Närmaste dokumentnamn på samma rad.
+
+    'RAG nämns inte i CV:t, trots att det är centralt i examensarbetet' -> CV:t (närmast).
+    Hittas inget namn på raden antas påståendet gälla alla dokument (försiktigt).
+    """
+    tokens = _doc_tokens(doc_names)
+    targets: List[str] = []
+    for line in answer.splitlines():
+        for m in _ABSENCE.finditer(line):
+            best, best_dist = None, None
+            for name, ws in tokens.items():
+                for w in ws:
+                    for hit in re.finditer(rf"(?<![a-zåäö]){re.escape(w)}(?![a-zåäö])", line.lower()):
+                        dist = min(abs(hit.start() - m.end()), abs(m.start() - hit.end()))
+                        if best_dist is None or dist < best_dist:
+                            best, best_dist = name, dist
+            for d in ([best] if best else doc_names):
+                if d not in targets:
+                    targets.append(d)
+    return targets
 
 
 class ToolError(Exception):
