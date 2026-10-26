@@ -25,6 +25,9 @@ from sentence_transformers import SentenceTransformer
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/LaBSE")
 CHUNK_MAX_TOKENS = int(os.getenv("CHUNK_MAX_TOKENS", "300"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
+# Mycket korta chunks (rubriksidor, sidfötter) får orimligt hög likhet med
+# korta frågor och tränger undan riktiga träffar. Under gränsen slängs de.
+MIN_CHUNK_WORDS = int(os.getenv("MIN_CHUNK_WORDS", "20"))
 TOP_K_DEFAULT = int(os.getenv("TOP_K", "8"))
 OUTPUT_LANGUAGE = os.getenv("OUTPUT_LANGUAGE", "sv")  # "sv" eller "en"
 
@@ -91,6 +94,10 @@ def build_doc(name: str, pages: List[Tuple[int, str]]) -> Dict[str, Any]:
         for chunk in chunk_text(text or ""):
             chunks.append({"page_no": page_no, "text": chunk})
 
+    long_chunks = [c for c in chunks if len(c["text"].split()) >= MIN_CHUNK_WORDS]
+    if long_chunks:  # behåll allt om dokumentet bara består av korta bitar
+        chunks = long_chunks
+
     embeddings = embed_texts([c["text"] for c in chunks])
     full_text = "\n".join(text for _, text in pages if text)
 
@@ -103,16 +110,44 @@ def build_doc(name: str, pages: List[Tuple[int, str]]) -> Dict[str, Any]:
     }
 
 
+# Hybridsökning: semantisk likhet + bonus för chunks som innehåller frågans ord.
+# Semantisk sökning missar exakta saker (namn, siffror, paragrafer, tabellrader);
+# ordträffar fångar dem. Vikten är liten så att betydelse fortfarande styr.
+KEYWORD_WEIGHT = float(os.getenv("KEYWORD_WEIGHT", "0.25"))
+
+_STOPWORDS = {
+    "och", "att", "det", "som", "för", "med", "den", "har", "inte", "till", "från", "vad",
+    "hur", "vilka", "vilken", "vilket", "när", "var", "kan", "ska", "om", "mot", "eller",
+    "the", "and", "for", "with", "what", "how", "which", "when", "where", "are", "was",
+    "does", "this", "that", "from", "about", "dokumentet", "dokumenten", "document",
+}
+
+
+def query_terms(query: str) -> List[str]:
+    """Meningsbärande ord i frågan (minst 3 tecken, inga stoppord)."""
+    words = re.findall(r"[\wåäöÅÄÖ]+", query.lower())
+    return list(dict.fromkeys(w for w in words if len(w) >= 3 and w not in _STOPWORDS))
+
+
+def keyword_coverage(terms: List[str], text: str) -> float:
+    """Andel av frågans ord som finns i texten. Prefix räcker: 'soliditet' matchar 'soliditeten'."""
+    if not terms:
+        return 0.0
+    low = text.lower()
+    return sum(1 for term in terms if term in low) / len(terms)
+
+
 def search(
     query: str,
     docs: List[Dict[str, Any]],
     top_k: int = TOP_K_DEFAULT,
 ) -> List[Dict[str, Any]]:
-    """Semantisk sökning över sessionsdokumenten. Returnerar bästa träffarna."""
+    """Hybridsökning över sessionsdokumenten. Returnerar bästa träffarna."""
     if not docs:
         return []
 
     query_vec = embed_texts([query])[0]
+    terms = query_terms(query)
     hits: List[Dict[str, Any]] = []
 
     for doc in docs:
@@ -120,12 +155,13 @@ def search(
             continue
         scores = doc["embeddings"] @ query_vec
         for chunk, score in zip(doc["chunks"], scores):
+            bonus = KEYWORD_WEIGHT * keyword_coverage(terms, chunk["text"])
             hits.append(
                 {
                     "doc_name": doc["name"],
                     "page_no": chunk["page_no"],
                     "text": chunk["text"],
-                    "score": float(score),
+                    "score": float(score) + bonus,
                 }
             )
 
